@@ -1,12 +1,12 @@
+use cluster_utils::bybit;
 use cluster_utils::common::{Cluster, Trade};
-use cluster_utils::request;
 use trade_aggregation::*;
 
 fn main() {
-    let trades = request::get_trades("BTCUSD", 1);
+    let trades = bybit::get_trades("BTCUSD", 1);
 
     // specify the aggregation rule to be time based and the resolution each trade timestamp has
-    let time_rule = TimeRule::new(M5, TimestampResolution::Second);
+    let time_rule = TimeRule::new(M15, TimestampResolution::Second);
     // Notice how the aggregator is generic over the output candle type,
     // the aggregation rule as well as the input trade data
     let mut aggregator = GenericAggregator::<Cluster, TimeRule, Trade>::new(time_rule, false);
@@ -24,11 +24,13 @@ fn main() {
         }
     }
 
-    let ten: Vec<Cluster> = clusters.into_iter().take(10).collect();
+    clusters.iter_mut().for_each(|c| c.finalize());
+
+    let ten: Vec<Cluster> = clusters.into_iter().collect();
 
     let json = serde_json::to_string(&ten).unwrap();
 
     // write to file
-    let file_name = format!("data/{}-clusters.json", "5m");
+    let file_name = format!("data/{}-clusters.json", "15m");
     std::fs::write(file_name, json).unwrap();
 }

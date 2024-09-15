@@ -111,10 +111,24 @@ impl Level {
     }
 }
 
+#[derive(Debug, Serialize, Clone)]
+enum Pressure {
+    Top,
+    Middle,
+    Bottom,
+}
+
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct Cluster {
+    #[serde(skip_serializing)]
     pub levels: Vec<Level>,
     pub ts: i64,
+    poc: Option<Level>,
+    pressure: Option<Pressure>,
+    height: Option<usize>,
+    volume: Option<f64>,
+    volume_delta: Option<f64>,
+    trades_delta: Option<i32>,
 }
 
 impl Cluster {
@@ -122,6 +136,12 @@ impl Cluster {
         Cluster {
             levels: Vec::new(),
             ts: 0,
+            poc: None,
+            pressure: None,
+            height: None,
+            volume: None,
+            volume_delta: None,
+            trades_delta: None,
         }
     }
 
@@ -138,5 +158,42 @@ impl Cluster {
         if !found {
             self.levels.push(Level::new(trade));
         }
+    }
+
+    pub fn finalize(&mut self) {
+        self.sort_levels();
+
+        let (poc_index, point_of_control) = self
+            .levels
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.volume.partial_cmp(&b.1.volume).unwrap())
+            .unwrap();
+
+        self.poc = Some(point_of_control.clone());
+
+        let cluster_length = self.levels.len();
+        let poc_fraction = poc_index as f64 / cluster_length as f64;
+
+        if poc_fraction < 0.33 {
+            self.pressure = Some(Pressure::Top);
+        } else if poc_fraction > 0.66 {
+            self.pressure = Some(Pressure::Bottom);
+        } else {
+            self.pressure = Some(Pressure::Middle);
+        }
+
+        self.height = Some(cluster_length);
+
+        self.levels.iter().for_each(|l| {
+            self.volume = Some(self.volume.unwrap_or(0.0) + l.volume);
+            self.volume_delta = Some(self.volume_delta.unwrap_or(0.0) + l.volume_delta);
+            self.trades_delta = Some(self.trades_delta.unwrap_or(0) + l.trades_delta);
+        });
+    }
+
+    fn sort_levels(&mut self) {
+        self.levels
+            .sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap());
     }
 }
