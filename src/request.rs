@@ -4,7 +4,18 @@ use csv::StringRecord;
 use std::path::Path;
 
 const BASE_URL: &str = "https://public.bybit.com/trading";
-const HEADERS: [&str; 10] = ["timestamp", "symbol", "side", "_", "price", "tick_direction", "trade_id", "_", "_", "volume"];
+const HEADERS: [&str; 10] = [
+    "timestamp",
+    "symbol",
+    "side",
+    "_",
+    "price",
+    "tick_direction",
+    "trade_id",
+    "_",
+    "_",
+    "volume",
+];
 
 pub fn get_trades(symbol: &str, days_ago: i32) -> Vec<Trade> {
     let mut trades: Vec<Trade> = Vec::new();
@@ -12,8 +23,12 @@ pub fn get_trades(symbol: &str, days_ago: i32) -> Vec<Trade> {
     let current_date = Utc::now().date_naive();
 
     let dates: Vec<String> = (1..=days_ago)
-    .map(|i| (current_date - Duration::days(i as i64)).format("%Y-%m-%d").to_string())
-    .collect();
+        .map(|i| {
+            (current_date - Duration::days(i as i64))
+                .format("%Y-%m-%d")
+                .to_string()
+        })
+        .collect();
 
     let available_files = get_available_files(symbol, dates);
 
@@ -31,10 +46,7 @@ pub fn get_trades(symbol: &str, days_ago: i32) -> Vec<Trade> {
 
             trades.push(trade);
         }
-
     }
-
-    dbg!(&trades);
 
     trades
 }
