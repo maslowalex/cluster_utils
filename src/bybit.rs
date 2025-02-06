@@ -1,6 +1,7 @@
-use crate::common::Trade;
-use chrono::{Duration, Utc};
+use crate::common::{Side, Trade};
+use chrono::{Duration, NaiveTime, Utc};
 use csv::StringRecord;
+use serde::Deserialize;
 use std::path::Path;
 
 const BASE_URL: &str = "https://public.bybit.com/trading";
@@ -10,12 +11,40 @@ const HEADERS: [&str; 10] = [
     "side",
     "_",
     "price",
-    "tick_direction",
-    "trade_id",
+    "_",
+    "_",
     "_",
     "_",
     "volume",
 ];
+
+#[derive(Debug, Deserialize)]
+struct BybitTrade {
+    timestamp: f64,
+    symbol: String,
+    side: String,
+    price: f64,
+    volume: f64,
+}
+
+impl BybitTrade {
+    fn to_trade(&self) -> Trade {
+        let side = match self.side.as_str() {
+            "Buy" => Side::Buy,
+            "Sell" => Side::Sell,
+            _ => panic!("Invalid side"),
+        };
+        let timestamp: f64 = self.timestamp * 1000.0;
+
+        Trade::new(
+            self.symbol.clone(),
+            self.price,
+            self.volume,
+            timestamp as f64,
+            side,
+        )
+    }
+}
 
 pub fn get_trades(symbol: &str, days_ago: i32) -> Vec<Trade> {
     let mut trades: Vec<Trade> = Vec::new();
@@ -39,12 +68,31 @@ pub fn get_trades(symbol: &str, days_ago: i32) -> Vec<Trade> {
 
         let headers = StringRecord::from(HEADERS.to_vec());
 
+        let mut first_trade = true;
         for result in rdr.records() {
             let record = result.unwrap();
 
-            let trade: Trade = record.deserialize::<Trade>(Some(&headers)).unwrap();
+            let byit_trade: BybitTrade = record.deserialize::<BybitTrade>(Some(&headers)).unwrap();
+            let trade = byit_trade.to_trade();
 
-            trades.push(trade);
+            if first_trade {
+                first_trade = false;
+
+                let midnight = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+                let date = chrono::DateTime::from_timestamp_millis(trade.timestamp as i64).unwrap();
+                let corrected_ts = date.with_time(midnight).unwrap().timestamp_millis() as f64;
+                let trade = Trade::new(
+                    trade.symbol.clone(),
+                    trade.price,
+                    trade.volume,
+                    corrected_ts,
+                    trade.side,
+                );
+
+                trades.push(trade);
+            } else {
+                trades.push(trade);
+            }
         }
     }
 
@@ -57,7 +105,7 @@ fn get_available_files(symbol: &str, dates: Vec<String>) -> Vec<String> {
     for date in dates {
         let symbol_date = format!("{}{}", symbol, date);
         let url = format!("{}/{}/{}.csv.gz", BASE_URL, symbol, symbol_date);
-        let csv_file_path: String = format!("/tmp/{}.csv", symbol_date);
+        let csv_file_path: String = format!("tmp/{}.csv", symbol_date);
 
         if Path::new(&csv_file_path).exists() {
             files.push(csv_file_path);

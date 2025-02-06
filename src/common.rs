@@ -11,11 +11,11 @@ pub enum Side {
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone)]
 pub struct Trade {
-    symbol: String,
-    price: f64,
-    volume: f64,
-    timestamp: f64,
-    side: Side,
+    pub symbol: String,
+    pub price: f64,
+    pub volume: f64,
+    pub timestamp: f64,
+    pub side: Side,
 }
 
 impl Trade {
@@ -50,11 +50,14 @@ impl TakerTrade for Trade {
 impl ModularCandle<Trade> for Cluster {
     fn update(&mut self, trade: &Trade) {
         self.update_levels(trade);
-        self.ts = trade.timestamp as i64;
+
+        if self.ts == 0 {
+            self.ts = trade.timestamp as i64;
+        }
     }
 
     fn reset(&mut self) {
-        Cluster::default();
+        *self = Cluster::default();
     }
 }
 
