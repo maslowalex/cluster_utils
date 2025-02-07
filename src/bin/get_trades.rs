@@ -3,8 +3,9 @@ use cluster_utils::bybit;
 use cluster_utils::common::{Cluster, Trade};
 use trade_aggregation::*;
 
-use std::sync::Arc;
-use std::thread;
+use tokio::fs::File;
+use tokio::io::{AsyncWriteExt, BufWriter};
+use tokio::task;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -19,34 +20,35 @@ struct Arguments {
     days_ago: i32,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Arguments::parse();
 
     let trades = bybit::get_trades(&args.symbol, args.days_ago);
     println!("Total number of trades in batch: {}", trades.len());
 
-    let trades = Arc::new(trades);
-
     let timeframes = vec![300, 600, 1800, 3600, 14400];
-    let timeframes = Arc::new(timeframes);
 
-    let handles: Vec<_> = (0..timeframes.len())
-        .map(|timeframe: usize| {
-            let data_clone = Arc::clone(&trades);
-            let timeframes = Arc::clone(&timeframes);
-            let symbol = args.symbol.clone();
-            thread::spawn(move || {
-                aggregate_trades(data_clone, timeframes[timeframe], &symbol, args.days_ago);
-            })
-        })
-        .collect();
+    let mut tasks = Vec::new();
 
-    for handle in handles {
-        handle.join().unwrap();
+    for (_i, item) in timeframes.iter().enumerate() {
+        let trades = trades.clone();
+        let symbol = args.symbol.clone(); // Full copy of the data
+
+        tasks.push(task::spawn(aggregate_trades(
+            trades,
+            *item,
+            symbol,
+            args.days_ago,
+        )));
+    }
+
+    for task in tasks {
+        task.await.unwrap();
     }
 }
 
-fn aggregate_trades(trades: Arc<Vec<Trade>>, timeframe: i64, symbol: &str, days_ago: i32) -> () {
+async fn aggregate_trades(trades: Vec<Trade>, timeframe: i64, symbol: String, days_ago: i32) -> () {
     // specify the aggregation rule to be time based and the resolution each trade timestamp has
     let time_rule = TimeRule::new(timeframe, TimestampResolution::Millisecond);
     // Notice how the aggregator is generic over the output candle type,
@@ -73,9 +75,19 @@ fn aggregate_trades(trades: Arc<Vec<Trade>>, timeframe: i64, symbol: &str, days_
     println!("Writing to file");
 
     // write to file
-    let file_name = format!(
+    let filename = format!(
         "data/{}-{}-{}dago-clusters.json",
         symbol, timeframe, days_ago
     );
-    std::fs::write(file_name, json).unwrap();
+
+    let file = File::create(&filename)
+        .await
+        .expect("Failed to create file");
+    let mut writer = BufWriter::new(file);
+
+    writer
+        .write_all(json.as_bytes())
+        .await
+        .expect("Failed to write to file");
+    writer.flush().await.expect("Failed to flush buffer");
 }
