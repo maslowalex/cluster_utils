@@ -4,11 +4,11 @@ use cluster_utils::common::{Cluster, Trade};
 use trade_aggregation::*;
 
 use std::collections::HashMap;
+use tokio::fs;
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
-use tokio::time::{sleep, Duration};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -108,21 +108,39 @@ async fn write_clusters(
 
     println!("Spawned writer for {}", timeframe);
 
+    writer.write(b"[").await.expect("Failed to write to file");
+
     while let Some(cluster) = rx_clusters.recv().await {
-        println!(
-            "Pushing cluster for {} with {} levels",
-            timeframe,
-            &cluster.levels.len()
-        );
+        let json = serde_json::to_string(&cluster).unwrap();
+
+        // add comma as bytes to separate clusters
+        writer
+            .write(json.as_bytes())
+            .await
+            .expect("Failed to write to file");
+        writer.write(b",\n").await.expect("Failed to write to file");
 
         clusters.push(cluster);
     }
 
-    let json = serde_json::to_string(&clusters).unwrap();
-
-    writer
-        .write_all(json.as_bytes())
-        .await
-        .expect("Failed to write to file");
+    writer.write(b"]").await.expect("Failed to write to file");
     writer.flush().await.expect("Failed to flush buffer");
+
+    println!("Fixing trailing comma for {}", filename);
+    // Hanlde fkn trailing comma
+    let contents = fs::read_to_string(&filename)
+        .await
+        .expect("Failed to read file");
+    // Remove trailing comma before closing array `]`
+    let fixed_content = contents
+        .replace(",\n]", "\n]") // Fix trailing comma before array close
+        .replace(", ]", " ]"); // Handle cases with extra spaces
+
+    let mut file = fs::File::create(filename)
+        .await
+        .expect("Failed to open file");
+    file.write_all(fixed_content.as_bytes())
+        .await
+        .expect("Failed to write");
+    file.flush().await.expect("Failed to flush");
 }
