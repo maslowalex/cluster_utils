@@ -38,7 +38,7 @@ impl BybitTrade {
 
         Trade::new(
             self.symbol.clone(),
-            self.price,
+            maybe_round_price(self.price),
             self.volume,
             timestamp as f64,
             side,
@@ -131,4 +131,20 @@ fn get_available_files(symbol: &str, dates: Vec<String>) -> Vec<String> {
     }
 
     files
+}
+
+fn maybe_round_price(price: f64) -> f64 {
+    match price {
+        price if price > 10_000.0 =>
+        // Round to 10s
+        {
+            (price / 10.0).round() * 10.0
+        }
+        price if price > 1000.0 =>
+        // Round to 5s
+        {
+            (price / 5.0).round() * 5.0
+        }
+        _ => price,
+    }
 }

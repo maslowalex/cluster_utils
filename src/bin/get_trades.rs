@@ -3,11 +3,12 @@ use cluster_utils::bybit;
 use cluster_utils::common::{Cluster, Trade};
 use trade_aggregation::*;
 
-use std::time::Instant;
+use std::collections::HashMap;
 use tokio::fs::File;
 use tokio::io::{AsyncWriteExt, BufWriter};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task;
+use tokio::time::{sleep, Duration};
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -30,48 +31,51 @@ async fn main() {
     println!("Total number of trades in batch: {}", trades.len());
 
     let timeframes = vec![300, 600, 1800, 3600, 14400];
-    let (tx_trades, _) = broadcast::channel::<Trade>(1_000_000);
-    let (tx_clusters, _) = broadcast::channel::<Cluster>(10_000_000);
+    let (tx_trades, _) = broadcast::channel::<Trade>(trades.len());
+    let mut tx_clusters_map = HashMap::new();
+    let mut worker_handles = Vec::new();
 
-    for t in &timeframes {
-        let rx_worker = tx_trades.subscribe();
-        let tx_worker = tx_clusters.clone();
-        task::spawn(aggregate_trades(rx_worker, tx_worker, *t));
-    }
+    // Create a dedicated `mpsc::channel` for each timeframe
+    for &timeframe in &timeframes {
+        let (tx_clusters, rx_clusters) = mpsc::channel::<Cluster>(5000);
+        tx_clusters_map.insert(timeframe, tx_clusters);
 
-    // Spawn the writer task
-    let writer_tasks: Vec<_> = timeframes.clone().iter().map(|t| {
-        let worker_rx = tx_clusters.subscribe();
         task::spawn(write_clusters(
-            worker_rx,
+            rx_clusters,
             args.symbol.clone(),
-            *t,
+            timeframe,
             args.days_ago,
-        ))
-    }).collect();
-
-    // Stream trades to workers via the broadcast channel
-    for trade in trades {
-        tx_trades.send(trade).expect("Failed to send trade");
+        ));
     }
 
-    // Drop the sender so workers can finish
-    drop(tx_trades);
-    drop(tx_clusters); // Close cluster sender so writer exits
+    // Spawn worker tasks
+    for tf in &timeframes {
+        let rx_worker = tx_trades.subscribe(); // Subscribe before sending
+        let cluster_woker = tx_clusters_map.get(tf).unwrap().clone();
 
-    for writer_task in writer_tasks.into_iter() {
-        writer_task.await.expect("Failed to join writer task");
+        let task = task::spawn(aggregate_trades(rx_worker, cluster_woker, *tf));
+        worker_handles.push(task);
+    }
+
+    // Send trades AFTER workers are ready
+    for trade in trades {
+        tx_trades.send(trade.clone()).expect("Failed to send trade");
+    }
+
+    drop(tx_trades); // Ensure workers finish
+    drop(tx_clusters_map); // Ensure writers finish
+
+    for handle in worker_handles {
+        handle.await.expect("Worker task panicked");
     }
 }
+
 async fn aggregate_trades(
     mut rx: broadcast::Receiver<Trade>,
-    tx_clusters: broadcast::Sender<Cluster>,
+    tx_clusters: mpsc::Sender<Cluster>,
     timeframe: i64,
 ) -> () {
-    // specify the aggregation rule to be time based and the resolution each trade timestamp has
     let time_rule = TimeRule::new(timeframe, TimestampResolution::Millisecond);
-    // Notice how the aggregator is generic over the output candle type,
-    // the aggregation rule as well as the input trade data
     let mut aggregator = GenericAggregator::<Cluster, TimeRule, Trade>::new(time_rule, true);
 
     while let Ok(trade) = rx.recv().await {
@@ -79,6 +83,7 @@ async fn aggregate_trades(
             cluster.finalize();
             tx_clusters
                 .send(cluster)
+                .await
                 .expect("Failed to send cluster");
         }
     }
@@ -86,7 +91,7 @@ async fn aggregate_trades(
 
 /// Writer task: collects clusters from workers and writes them in bulk
 async fn write_clusters(
-    mut rx_clusters: broadcast::Receiver<Cluster>,
+    mut rx_clusters: mpsc::Receiver<Cluster>,
     symbol: String,
     timeframe: i64,
     days_ago: i32,
@@ -101,11 +106,20 @@ async fn write_clusters(
         .expect("Failed to create file");
     let mut writer = BufWriter::new(file);
 
-    while let Ok(cluster) = rx_clusters.recv().await {
+    println!("Spawned writer for {}", timeframe);
+
+    while let Some(cluster) = rx_clusters.recv().await {
+        println!(
+            "Pushing cluster for {} with {} levels",
+            timeframe,
+            &cluster.levels.len()
+        );
+
         clusters.push(cluster);
     }
 
     let json = serde_json::to_string(&clusters).unwrap();
+
     writer
         .write_all(json.as_bytes())
         .await
