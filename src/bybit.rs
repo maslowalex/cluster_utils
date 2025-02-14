@@ -1,22 +1,27 @@
 use crate::common::{Side, Trade};
 use chrono::{Duration, NaiveTime, Utc};
+use csv::ReaderBuilder;
 use csv::StringRecord;
+use once_cell::sync::Lazy;
 use serde::Deserialize;
+use std::iter::Enumerate;
 use std::path::Path;
 
 const BASE_URL: &str = "https://public.bybit.com/trading";
-const HEADERS: [&str; 10] = [
-    "timestamp",
-    "symbol",
-    "side",
-    "_",
-    "price",
-    "_",
-    "_",
-    "_",
-    "_",
-    "volume",
-];
+static HEADERS: Lazy<StringRecord> = Lazy::new(|| {
+    StringRecord::from(vec![
+        "timestamp",
+        "symbol",
+        "side",
+        "_",
+        "price",
+        "_",
+        "_",
+        "_",
+        "_",
+        "volume",
+    ])
+});
 
 #[derive(Debug, Deserialize)]
 struct BybitTrade {
@@ -46,9 +51,12 @@ impl BybitTrade {
     }
 }
 
-pub fn get_trades(symbol: &str, days_ago: i32) -> Vec<Trade> {
-    let mut trades: Vec<Trade> = Vec::new();
+pub fn deserialize_row(record: &StringRecord) -> Trade {
+    let byit_trade: BybitTrade = record.deserialize::<BybitTrade>(Some(&HEADERS)).unwrap();
+    byit_trade.to_trade()
+}
 
+pub fn get_trades_csvs(symbol: &str, days_ago: i32) -> Vec<String> {
     let current_date = Utc::now().date_naive();
 
     let dates: Vec<String> = (1..=days_ago)
@@ -59,44 +67,7 @@ pub fn get_trades(symbol: &str, days_ago: i32) -> Vec<Trade> {
         })
         .collect();
 
-    let available_files = get_available_files(symbol, dates);
-
-    for file in available_files {
-        let file = std::fs::File::open(file).unwrap();
-        let buf_reader = std::io::BufReader::new(file);
-        let mut rdr = csv::Reader::from_reader(buf_reader);
-
-        let headers = StringRecord::from(HEADERS.to_vec());
-
-        let mut first_trade = true;
-        for result in rdr.records() {
-            let record = result.unwrap();
-
-            let byit_trade: BybitTrade = record.deserialize::<BybitTrade>(Some(&headers)).unwrap();
-            let trade = byit_trade.to_trade();
-
-            if first_trade {
-                first_trade = false;
-
-                let midnight = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
-                let date = chrono::DateTime::from_timestamp_millis(trade.timestamp as i64).unwrap();
-                let corrected_ts = date.with_time(midnight).unwrap().timestamp_millis() as f64;
-                let trade = Trade::new(
-                    trade.symbol.clone(),
-                    trade.price,
-                    trade.volume,
-                    corrected_ts,
-                    trade.side,
-                );
-
-                trades.push(trade);
-            } else {
-                trades.push(trade);
-            }
-        }
-    }
-
-    trades
+    get_available_files(symbol, dates)
 }
 
 fn get_available_files(symbol: &str, dates: Vec<String>) -> Vec<String> {
@@ -131,6 +102,35 @@ fn get_available_files(symbol: &str, dates: Vec<String>) -> Vec<String> {
     }
 
     files
+}
+
+pub fn get_trades_lazy<'a>(file: &str) -> impl Iterator<Item = Trade> {
+    let file = std::fs::File::open(file).unwrap();
+    let rdr = ReaderBuilder::new().has_headers(true).from_reader(file);
+
+    let mut first_trade = true;
+
+    let trades_iterator = rdr.into_records().map(move |result| {
+        let record = result.expect("Error reading CSV record");
+        let mut trade = deserialize_row(&record);
+
+        if first_trade {
+            first_trade = false;
+            let midnight = NaiveTime::from_hms_opt(0, 0, 0).unwrap();
+            let date = chrono::DateTime::from_timestamp_millis(trade.timestamp as i64).unwrap();
+            let corrected_ts = date.with_time(midnight).unwrap().timestamp_millis() as f64;
+            trade = Trade::new(
+                trade.symbol.clone(),
+                trade.price,
+                trade.volume,
+                corrected_ts,
+                trade.side,
+            );
+        }
+        trade
+    });
+
+    trades_iterator
 }
 
 fn maybe_round_price(price: f64) -> f64 {

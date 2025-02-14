@@ -27,11 +27,8 @@ struct Arguments {
 async fn main() {
     let args = Arguments::parse();
 
-    let trades = bybit::get_trades(&args.symbol, args.days_ago);
-    println!("Total number of trades in batch: {}", trades.len());
-
     let timeframes = vec![300, 600, 1800, 3600, 14400];
-    let (tx_trades, _) = broadcast::channel::<Trade>(trades.len());
+    let (tx_trades, _) = broadcast::channel::<Trade>(10_000_000);
     let mut tx_clusters_map = HashMap::new();
     let mut worker_handles = Vec::new();
 
@@ -57,13 +54,22 @@ async fn main() {
         worker_handles.push(task);
     }
 
-    // Send trades AFTER workers are ready
-    for trade in trades {
-        tx_trades.send(trade.clone()).expect("Failed to send trade");
+    let csvs = bybit::get_trades_csvs(&args.symbol, args.days_ago);
+
+    let mut num_of_trades = 0;
+    for file in csvs {
+        let iter = bybit::get_trades_lazy(&file);
+
+        for trade in iter {
+            tx_trades.send(trade.clone()).expect("Failed to send trade");
+            num_of_trades += 1;
+        }
     }
 
     drop(tx_trades); // Ensure workers finish
     drop(tx_clusters_map); // Ensure writers finish
+
+    print!("{} Trades processed!", num_of_trades);
 
     for handle in worker_handles {
         handle.await.expect("Worker task panicked");
